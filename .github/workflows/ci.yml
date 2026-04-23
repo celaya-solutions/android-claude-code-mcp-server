@@ -1,0 +1,48 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "20"
+          cache: npm
+
+      - name: Install deps
+        run: npm ci
+
+      - name: Syntax check JS sources
+        run: |
+          node --check src/index.js
+          node --check bin/init.js
+          node --check bin/cli.js
+
+      - name: Syntax check bash scripts
+        run: |
+          bash -n scripts/bootstrap.sh
+          bash -n bin/start-shizuku.sh
+
+      - name: MCP server handshake and tools/list (no device needed)
+        run: bash .github/scripts/mcp_smoke.sh
+
+      - name: CLI subcommand surface
+        run: |
+          node bin/cli.js --help | grep -q init
+          node bin/cli.js --help | grep -q server
+          node bin/cli.js --help | grep -q start-shizuku
+          if node bin/cli.js bogus 2>/dev/null; then
+            echo "expected nonzero exit for unknown subcommand"
+            exit 1
+          fi

@@ -1,10 +1,16 @@
-# android-claude-code-mcp-server
+# android-claude-code-mcp
+
+[![CI](https://github.com/celaya-solutions/android-claude-code-mcp-server/actions/workflows/ci.yml/badge.svg)](https://github.com/celaya-solutions/android-claude-code-mcp-server/actions/workflows/ci.yml)
+[![npm version](https://img.shields.io/npm/v/android-claude-code-mcp.svg)](https://www.npmjs.com/package/android-claude-code-mcp)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](LICENSE)
 
 A Model Context Protocol (MCP) server that gives Claude Code (or any MCP host) a full
 toolkit for driving an Android phone from a Mac — install Termux, stand up the real
 `claude` CLI inside a Debian proot, reach the phone over SSH + Tailscale, and — via
 Shizuku — execute commands at the Android **shell UID** (2000) for elevated UI and
 system control without rooting the device.
+
+![demo: node bin/cli.js init completing all 9 phases](assets/demo.gif)
 
 The project was built end-to-end in one session with Claude Code running on an
 unrooted Samsung Galaxy S24 (SM-S921U) against a macOS host. It works on any Android
@@ -166,6 +172,10 @@ Mac (MCP host)
 ### One-command bootstrap
 
 ```bash
+# Once published to npm:
+npx android-claude-code-mcp init
+
+# Or from a clone:
 git clone https://github.com/celaya-solutions/android-claude-code-mcp-server.git
 cd android-claude-code-mcp-server
 npm install

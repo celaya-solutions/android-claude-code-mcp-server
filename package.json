@@ -1,20 +1,54 @@
 {
-  "name": "android-mcp-server",
-  "version": "0.1.0",
-  "description": "MCP server to drive an Android device via ADB (install Termux, run shell, set up Claude Code).",
-  "private": true,
+  "name": "android-claude-code-mcp",
+  "version": "1.0.0",
+  "description": "MCP server + one-command bootstrap that runs the real Claude Code on an unrooted Android phone — adb, SSH, Tailscale, Shizuku shell-UID, UI automation via the accessibility tree.",
   "type": "module",
   "bin": {
-    "android-mcp-server": "src/index.js",
-    "android-claude-code-mcp": "bin/cli.js"
+    "android-claude-code-mcp": "bin/cli.js",
+    "android-mcp-server": "src/index.js"
   },
   "scripts": {
-    "start": "node src/index.js"
+    "start": "node src/index.js",
+    "test": ".github/scripts/mcp_smoke.sh"
   },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "claude",
+    "claude-code",
+    "android",
+    "termux",
+    "adb",
+    "shizuku",
+    "proot-distro",
+    "tailscale",
+    "ui-automation"
+  ],
+  "homepage": "https://github.com/celaya-solutions/android-claude-code-mcp-server#readme",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/celaya-solutions/android-claude-code-mcp-server.git"
+  },
+  "bugs": {
+    "url": "https://github.com/celaya-solutions/android-claude-code-mcp-server/issues"
+  },
+  "author": "Christopher Celaya <mr.christophercelaya@gmail.com>",
+  "license": "MIT",
+  "files": [
+    "bin/",
+    "src/",
+    "scripts/",
+    "examples/",
+    "README.md",
+    "LICENSE"
+  ],
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.0.4"
   },
   "engines": {
     "node": ">=20"
+  },
+  "publishConfig": {
+    "access": "public"
   }
 }
