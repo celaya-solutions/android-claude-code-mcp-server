@@ -113,6 +113,81 @@ async function adbShell(command, { serial, timeoutMs } = {}) {
   return adb(["shell", command], { serial, timeoutMs });
 }
 
+// --- ui automator helpers -------------------------------------------------
+// Pulls the accessibility tree via `uiautomator dump` and parses it into a
+// flat list of node objects. Each node gets `_cx`/`_cy` centered-point helpers
+// so selector-driven tools can tap without the caller knowing coordinates.
+async function uiDump({ serial } = {}) {
+  // Unique per call so concurrent uiDump() invocations don't clobber each other.
+  const remote = `/sdcard/_mcp_ui_${process.pid}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}.xml`;
+  const dump = await adbShell(
+    `uiautomator dump ${remote} >/dev/null 2>&1 && cat ${remote} && rm -f ${remote}`,
+    { serial, timeoutMs: 20_000 },
+  );
+  if (dump.code !== 0) {
+    await adbShell(`rm -f ${remote}`, { serial }).catch(() => {});
+    return { ok: false, error: dump.stderr || dump.stdout, nodes: [] };
+  }
+  return { ok: true, xml: dump.stdout, nodes: parseUiXml(dump.stdout) };
+}
+
+function parseUiXml(xml) {
+  const nodes = [];
+  // Match `<node ...>` or `<node .../>`. Attribute values may contain `/`
+  // (e.g. resource-id="com.example:id/foo"), so we can't exclude `/` — just `>`.
+  for (const nm of xml.matchAll(/<node\s+([^>]+?)\s*\/?>/g)) {
+    const raw = nm[1];
+    const attrs = {};
+    for (const am of raw.matchAll(/([a-zA-Z][\w-]*)="([^"]*)"/g)) {
+      attrs[am[1]] = am[2];
+    }
+    if (attrs.bounds) {
+      const b = attrs.bounds.match(/\[(\d+),(\d+)\]\[(\d+),(\d+)\]/);
+      if (b) {
+        attrs._x1 = +b[1];
+        attrs._y1 = +b[2];
+        attrs._x2 = +b[3];
+        attrs._y2 = +b[4];
+        attrs._cx = (attrs._x1 + attrs._x2) >> 1;
+        attrs._cy = (attrs._y1 + attrs._y2) >> 1;
+      }
+    }
+    nodes.push(attrs);
+  }
+  return nodes;
+}
+
+// selector: { text?, textContains?, contentDesc?, resourceId?, className?, clickable? }
+// Returns the best matching node or null. Ties break toward clickable + smallest-area.
+function findNode(nodes, selector) {
+  const s = selector || {};
+  const match = (n) => {
+    if (s.text != null && n.text !== s.text) return false;
+    if (s.textContains != null && !(n.text || "").includes(s.textContains)) return false;
+    if (s.contentDesc != null && n["content-desc"] !== s.contentDesc) return false;
+    if (s.resourceId != null && n["resource-id"] !== s.resourceId) return false;
+    if (s.className != null && !(n.class || "").includes(s.className)) return false;
+    if (s.clickable != null && n.clickable !== String(s.clickable)) return false;
+    return true;
+  };
+  const hits = nodes.filter(match);
+  hits.sort((a, b) => {
+    const aClick = a.clickable === "true" ? 0 : 1;
+    const bClick = b.clickable === "true" ? 0 : 1;
+    if (aClick !== bClick) return aClick - bClick;
+    const aArea = (a._x2 - a._x1) * (a._y2 - a._y1);
+    const bArea = (b._x2 - b._x1) * (b._y2 - b._y1);
+    return aArea - bArea;
+  });
+  return hits[0] || null;
+}
+
+function summarizeNode(n) {
+  const keys = ["text", "content-desc", "resource-id", "class", "clickable", "bounds"];
+  const pairs = keys.filter((k) => n[k]).map((k) => `${k}=${JSON.stringify(n[k])}`);
+  return `{ ${pairs.join(", ")} }`;
+}
+
 function formatResult(res, { label } = {}) {
   const header = label ? `$ ${label}\n` : "";
   const body =
@@ -384,6 +459,220 @@ const TOOLS = [
       additionalProperties: false,
     },
   },
+  // ---------- UI automation tools (uiautomator tree + input gestures) ----------
+  {
+    name: "ui_dump",
+    description:
+      "Snapshot the on-screen accessibility tree via `uiautomator dump`. Returns a list " +
+      "of nodes with text/content-desc/resource-id/bounds so Claude can decide where to tap.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        serial: { type: "string" },
+        filter: {
+          type: "string",
+          description:
+            "Optional: only return nodes whose text, content-desc, or resource-id contains this substring.",
+        },
+        clickableOnly: { type: "boolean", description: "Drop non-clickable nodes from the result." },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "ui_tap",
+    description:
+      "Tap a UI element matched by a selector (text, textContains, contentDesc, resourceId, " +
+      "className). Preferred over raw coordinate taps. Falls back to `x`/`y` if no selector.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        text: { type: "string" },
+        textContains: { type: "string" },
+        contentDesc: { type: "string" },
+        resourceId: { type: "string" },
+        className: { type: "string" },
+        clickable: { type: "boolean" },
+        x: { type: "number", description: "Raw x (only used when no selector is given)." },
+        y: { type: "number" },
+        serial: { type: "string" },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "ui_type",
+    description:
+      "Type text into the currently-focused input. Call `ui_tap` on an input field first.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        text: { type: "string" },
+        pressEnter: { type: "boolean", description: "Send ENTER after typing." },
+        serial: { type: "string" },
+      },
+      required: ["text"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "ui_swipe",
+    description: "Swipe from (x1,y1) to (x2,y2) in the given duration (ms).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        x1: { type: "number" }, y1: { type: "number" },
+        x2: { type: "number" }, y2: { type: "number" },
+        durationMs: { type: "number" },
+        serial: { type: "string" },
+      },
+      required: ["x1", "y1", "x2", "y2"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "ui_screenshot",
+    description:
+      "Grab a screenshot. Saves to localPath if given (PNG), otherwise returns the image inline " +
+      "as a base64 data URL that Claude can view directly.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        localPath: { type: "string", description: "Optional host PNG path to save to." },
+        serial: { type: "string" },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "ui_back",
+    description: "Press the Android BACK key.",
+    inputSchema: {
+      type: "object",
+      properties: { serial: { type: "string" } },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "ui_home",
+    description: "Press the Android HOME key.",
+    inputSchema: {
+      type: "object",
+      properties: { serial: { type: "string" } },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "ui_wait_for",
+    description:
+      "Poll the accessibility tree until a selector matches (up to `timeoutMs` / default 8000). " +
+      "Useful after launching an app or navigating.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        text: { type: "string" },
+        textContains: { type: "string" },
+        contentDesc: { type: "string" },
+        resourceId: { type: "string" },
+        className: { type: "string" },
+        timeoutMs: { type: "number" },
+        serial: { type: "string" },
+      },
+      additionalProperties: false,
+    },
+  },
+
+  // ---------- App / package / permission tools ----------
+  {
+    name: "launch_app",
+    description:
+      "Start an app. Use `pkg` + optional `activity`, or `pkg` + `url` for VIEW-intent deep links " +
+      "(useful for opening URLs in Chrome: pkg=com.android.chrome, url=http://…).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        pkg: { type: "string" },
+        activity: { type: "string" },
+        url: { type: "string" },
+        action: { type: "string", description: "Override the intent action (default MAIN or VIEW if url)." },
+        serial: { type: "string" },
+      },
+      required: ["pkg"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "list_apps",
+    description: "List installed packages. `thirdPartyOnly` filters out system packages.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        thirdPartyOnly: { type: "boolean", description: "Adds -3 (third-party only)." },
+        filter: { type: "string", description: "Case-insensitive substring filter." },
+        serial: { type: "string" },
+      },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "uninstall_app",
+    description: "Uninstall a package by id.",
+    inputSchema: {
+      type: "object",
+      properties: { pkg: { type: "string" }, serial: { type: "string" } },
+      required: ["pkg"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "grant_permission",
+    description: "Grant a runtime permission to a package (pm grant).",
+    inputSchema: {
+      type: "object",
+      properties: {
+        pkg: { type: "string" },
+        permission: { type: "string", description: "e.g. android.permission.CAMERA" },
+        serial: { type: "string" },
+      },
+      required: ["pkg", "permission"],
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "install_apk_url",
+    description: "Download an APK from a URL to the host cache, then `adb install -r`.",
+    inputSchema: {
+      type: "object",
+      properties: {
+        url: { type: "string" },
+        filename: { type: "string", description: "Cache filename override." },
+        serial: { type: "string" },
+      },
+      required: ["url"],
+      additionalProperties: false,
+    },
+  },
+
+  // ---------- Observability ----------
+  {
+    name: "list_notifications",
+    description: "Parse `dumpsys notification --noredact` into a list of title/text/package summaries.",
+    inputSchema: {
+      type: "object",
+      properties: { serial: { type: "string" } },
+      additionalProperties: false,
+    },
+  },
+  {
+    name: "current_activity",
+    description: "Return the package + activity currently in the foreground.",
+    inputSchema: {
+      type: "object",
+      properties: { serial: { type: "string" } },
+      additionalProperties: false,
+    },
+  },
+
   {
     name: "start_shizuku",
     description:
@@ -518,6 +807,261 @@ async function handleTool(name, args) {
       const r = await adbShell(`input text '${escaped}'`, { serial: a.serial });
       return textResult(formatResult(r, { label: `input text` }), { isError: r.code !== 0 });
     }
+    case "ui_dump": {
+      const r = await uiDump({ serial: a.serial });
+      if (!r.ok) return textResult(`ui_dump failed: ${r.error}`, { isError: true });
+      let nodes = r.nodes.filter((n) => n.bounds);
+      if (a.clickableOnly) nodes = nodes.filter((n) => n.clickable === "true");
+      if (a.filter) {
+        const f = a.filter;
+        nodes = nodes.filter(
+          (n) =>
+            (n.text || "").includes(f) ||
+            (n["content-desc"] || "").includes(f) ||
+            (n["resource-id"] || "").includes(f),
+        );
+      }
+      const lines = nodes.map(
+        (n) =>
+          `  (${n._cx},${n._cy}) ${summarizeNode(n)}`.replace(/_x1|_y1|_x2|_y2|_cx|_cy/g, ""),
+      );
+      const summary = `${nodes.length} node(s)${a.filter ? ` matching "${a.filter}"` : ""}${
+        a.clickableOnly ? " (clickable only)" : ""
+      }`;
+      return textResult(`${summary}\n${lines.slice(0, 80).join("\n")}${lines.length > 80 ? `\n...(+${lines.length - 80} more)` : ""}`);
+    }
+
+    case "ui_tap": {
+      let x = a.x, y = a.y;
+      const selectorKeys = ["text", "textContains", "contentDesc", "resourceId", "className", "clickable"];
+      const hasSelector = selectorKeys.some((k) => a[k] != null);
+      if (hasSelector) {
+        const dump = await uiDump({ serial: a.serial });
+        if (!dump.ok) return textResult(`ui_tap: dump failed: ${dump.error}`, { isError: true });
+        const sel = {};
+        for (const k of selectorKeys) if (a[k] != null) sel[k] = a[k];
+        const node = findNode(dump.nodes, sel);
+        if (!node || node._cx == null) {
+          return textResult(`ui_tap: no node matched selector ${JSON.stringify(sel)}`, { isError: true });
+        }
+        x = node._cx;
+        y = node._cy;
+      }
+      if (x == null || y == null) {
+        return textResult("ui_tap: need a selector or explicit x/y", { isError: true });
+      }
+      const r = await adbShell(`input tap ${x} ${y}`, { serial: a.serial });
+      return textResult(`tapped (${x},${y})${r.stderr ? `\n${r.stderr}` : ""}`, {
+        isError: r.code !== 0,
+      });
+    }
+
+    case "ui_type": {
+      const escaped = a.text.replace(/ /g, "%s").replace(/'/g, "'\\''");
+      const r = await adbShell(`input text '${escaped}'`, { serial: a.serial });
+      if (r.code !== 0) return textResult(formatResult(r, { label: "input text" }), { isError: true });
+      if (a.pressEnter) {
+        const e = await adbShell("input keyevent 66", { serial: a.serial });
+        if (e.code !== 0) return textResult(formatResult(e, { label: "keyevent ENTER" }), { isError: true });
+      }
+      return textResult(`typed ${JSON.stringify(a.text)}${a.pressEnter ? " <ENTER>" : ""}`);
+    }
+
+    case "ui_swipe": {
+      const dur = a.durationMs || 300;
+      const r = await adbShell(`input swipe ${a.x1} ${a.y1} ${a.x2} ${a.y2} ${dur}`, { serial: a.serial });
+      return textResult(
+        `swiped (${a.x1},${a.y1}) -> (${a.x2},${a.y2}) in ${dur}ms${r.stderr ? `\n${r.stderr}` : ""}`,
+        { isError: r.code !== 0 },
+      );
+    }
+
+    case "ui_screenshot": {
+      const remote = "/sdcard/_mcp_shot.png";
+      const r1 = await adbShell(`screencap -p ${remote}`, { serial: a.serial });
+      if (r1.code !== 0) {
+        return textResult(formatResult(r1, { label: "screencap" }), { isError: true });
+      }
+      if (a.localPath) {
+        const r2 = await adb(["pull", remote, a.localPath], { serial: a.serial });
+        await adbShell(`rm -f ${remote}`, { serial: a.serial });
+        return textResult(formatResult(r2, { label: `pull -> ${a.localPath}` }), {
+          isError: r2.code !== 0,
+        });
+      }
+      // No localPath: read bytes and return as an image content block.
+      const tmp = join(DOWNLOAD_DIR, `shot_${Date.now()}.png`);
+      const pullRes = await adb(["pull", remote, tmp], { serial: a.serial });
+      await adbShell(`rm -f ${remote}`, { serial: a.serial });
+      if (pullRes.code !== 0) {
+        return textResult(formatResult(pullRes, { label: "pull screenshot" }), { isError: true });
+      }
+      const { readFile, unlink } = await import("node:fs/promises");
+      const buf = await readFile(tmp);
+      await unlink(tmp).catch(() => {});
+      return {
+        content: [
+          { type: "image", data: buf.toString("base64"), mimeType: "image/png" },
+          { type: "text", text: `screenshot captured (${buf.length} bytes)` },
+        ],
+      };
+    }
+
+    case "ui_back": {
+      const r = await adbShell("input keyevent 4", { serial: a.serial });
+      return textResult("BACK", { isError: r.code !== 0 });
+    }
+    case "ui_home": {
+      const r = await adbShell("input keyevent 3", { serial: a.serial });
+      return textResult("HOME", { isError: r.code !== 0 });
+    }
+
+    case "ui_wait_for": {
+      const timeout = a.timeoutMs || 8_000;
+      const deadline = Date.now() + timeout;
+      const selectorKeys = ["text", "textContains", "contentDesc", "resourceId", "className"];
+      const sel = {};
+      for (const k of selectorKeys) if (a[k] != null) sel[k] = a[k];
+      if (Object.keys(sel).length === 0) {
+        return textResult("ui_wait_for: provide at least one selector", { isError: true });
+      }
+      let last = null;
+      while (Date.now() < deadline) {
+        const dump = await uiDump({ serial: a.serial });
+        if (dump.ok) {
+          const hit = findNode(dump.nodes, sel);
+          if (hit) {
+            return textResult(`matched after ${Date.now() - (deadline - timeout)}ms: ${summarizeNode(hit)}`);
+          }
+        } else {
+          last = dump.error;
+        }
+        await new Promise((r) => setTimeout(r, 500));
+      }
+      return textResult(`ui_wait_for: timed out after ${timeout}ms waiting for ${JSON.stringify(sel)}${last ? `\n(last dump error: ${last})` : ""}`, { isError: true });
+    }
+
+    case "launch_app": {
+      // For plain-launch (no URL, no explicit activity), resolve the LAUNCHER activity
+      // via `cmd package resolve-activity` — passing a bare pkg to `am start -a MAIN`
+      // trips the Android Resolver on Samsung. For VIEW-intent URL deep links, go direct.
+      if (a.url) {
+        const args = [
+          "shell", "am", "start",
+          "-a", a.action || "android.intent.action.VIEW",
+          "-d", a.url,
+        ];
+        if (a.activity) args.push("-n", `${a.pkg}/${a.activity}`);
+        else args.push(a.pkg);
+        const r = await adb(args, { serial: a.serial });
+        return textResult(formatResult(r, { label: `launch ${a.pkg} ${a.url}` }), { isError: r.code !== 0 });
+      }
+      let activity = a.activity;
+      if (!activity) {
+        const resolve = await adbShell(
+          `cmd package resolve-activity --brief -c android.intent.category.LAUNCHER ${a.pkg}`,
+          { serial: a.serial },
+        );
+        // Last line of output is `<pkg>/<activity>` when resolved.
+        const line = (resolve.stdout || "").trim().split("\n").pop() || "";
+        if (line.includes("/")) activity = line.split("/")[1];
+      }
+      if (activity) {
+        const r = await adb(["shell", "am", "start", "-n", `${a.pkg}/${activity}`], { serial: a.serial });
+        return textResult(formatResult(r, { label: `launch ${a.pkg}/${activity}` }), {
+          isError: r.code !== 0,
+        });
+      }
+      // Fall back to monkey — it synthesizes a LAUNCHER intent.
+      const mk = await adbShell(`monkey -p ${a.pkg} -c android.intent.category.LAUNCHER 1`, { serial: a.serial });
+      return textResult(
+        `launched ${a.pkg} (monkey fallback)${mk.stdout ? `\n${mk.stdout}` : ""}`,
+        { isError: mk.code !== 0 },
+      );
+    }
+
+    case "list_apps": {
+      const args = ["shell", "pm", "list", "packages"];
+      if (a.thirdPartyOnly) args.push("-3");
+      const r = await adb(args, { serial: a.serial });
+      let lines = (r.stdout || "").split("\n").map((s) => s.replace(/^package:/, "").trim()).filter(Boolean);
+      if (a.filter) {
+        const f = a.filter.toLowerCase();
+        lines = lines.filter((p) => p.toLowerCase().includes(f));
+      }
+      return textResult(`${lines.length} package(s):\n${lines.slice(0, 200).join("\n")}`);
+    }
+
+    case "uninstall_app": {
+      const r = await adb(["uninstall", a.pkg], { serial: a.serial });
+      return textResult(formatResult(r, { label: `uninstall ${a.pkg}` }), { isError: r.code !== 0 });
+    }
+
+    case "grant_permission": {
+      const r = await adbShell(`pm grant ${a.pkg} ${a.permission}`, { serial: a.serial });
+      return textResult(formatResult(r, { label: `grant ${a.permission} -> ${a.pkg}` }), {
+        isError: r.code !== 0,
+      });
+    }
+
+    case "install_apk_url": {
+      const filename = a.filename || a.url.split("/").pop().split("?")[0] || "download.apk";
+      const dest = join(DOWNLOAD_DIR, filename);
+      if (!existsSync(dest)) {
+        try {
+          await downloadFile(a.url, dest);
+        } catch (e) {
+          return textResult(`download failed: ${e.message}`, { isError: true });
+        }
+      }
+      const r = await adb(["install", "-r", dest], { serial: a.serial, timeoutMs: 300_000 });
+      return textResult(`apk: ${dest}\n${formatResult(r, { label: "install" })}`, {
+        isError: r.code !== 0,
+      });
+    }
+
+    case "list_notifications": {
+      const r = await adbShell("dumpsys notification --noredact", { serial: a.serial });
+      if (r.code !== 0) {
+        return textResult(formatResult(r, { label: "dumpsys notification" }), { isError: true });
+      }
+      const out = r.stdout || "";
+      // Parse: each notification block starts with "NotificationRecord(…pkg=com.foo…)".
+      // Within the block: android.title=…, android.text=… entries.
+      const entries = [];
+      const blocks = out.split(/\n(?=\s*NotificationRecord\(|\s*N\[)/);
+      for (const blk of blocks) {
+        const pkgM = blk.match(/pkg=([^\s]+)/);
+        const titleM = blk.match(/android\.title=(?:String \()?([^\n)]+)\)?/);
+        const textM = blk.match(/android\.text=(?:String \()?([^\n)]+)\)?/);
+        if (pkgM && (titleM || textM)) {
+          entries.push({
+            pkg: pkgM[1],
+            title: titleM ? titleM[1].trim() : "",
+            text: textM ? textM[1].trim() : "",
+          });
+        }
+      }
+      // Dedupe
+      const seen = new Set();
+      const dedup = entries.filter((e) => {
+        const k = `${e.pkg}::${e.title}::${e.text}`;
+        if (seen.has(k)) return false;
+        seen.add(k);
+        return true;
+      });
+      const rendered = dedup.map((e) => `[${e.pkg}] ${e.title}${e.text ? ` — ${e.text}` : ""}`);
+      return textResult(`${dedup.length} notification(s):\n${rendered.join("\n")}`);
+    }
+
+    case "current_activity": {
+      const r = await adbShell(
+        "dumpsys window | grep -E 'mCurrentFocus|mFocusedApp' | head -4",
+        { serial: a.serial },
+      );
+      return textResult(formatResult(r, { label: "current_activity" }), { isError: r.code !== 0 });
+    }
+
     case "start_shizuku": {
       // Locate the Shizuku APK and invoke the starter binary packaged alongside it.
       const pmRes = await adb(["shell", "pm", "path", "moe.shizuku.privileged.api"], { serial: a.serial });

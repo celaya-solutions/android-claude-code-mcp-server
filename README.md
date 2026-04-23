@@ -49,16 +49,77 @@ This is the maximum non-root capability on a locked-bootloader Samsung.
 helper, so `git clone`/`push`/`pull`/`gh pr create` over HTTPS all work from any
 Claude session on the phone.
 
-## MCP tools
+## MCP tools (35)
 
-| Tool | Purpose |
+### UI automation — the star of the show
+
+| Tool | What it does |
 |---|---|
-| `adb_path`, `list_devices`, `device_info`, `shell`, `install_apk`, `push`, `pull` | Classic adb operations — used for bootstrap and for anything that must predate sshd |
-| `install_termux`, `open_termux`, `termux_type`, `termux_run_command` | Bootstrap / fallback controls for fresh installs |
-| `screencap`, `keyevent`, `input_text` | UI primitives (usable before Shizuku is up) |
-| `ssh_info`, `ssh_termux`, `ssh_debian` | Run commands in Termux or in the Debian proot over SSH — the preferred post-bootstrap channel |
-| `start_shizuku` | Restart Shizuku's shell-UID service via USB adb (needed after each reboot — Android 14 rotates its Wireless Debugging TLS keys) |
-| `claude_run` | One-shot `claude -p <prompt>` inside the Debian proot — returns stdout |
+| `ui_dump` | Snapshots the on-screen accessibility tree via `uiautomator dump`; returns flat node list with text/content-desc/resource-id/bounds. Supports `filter` and `clickableOnly`. |
+| `ui_tap` | Taps an element by **selector** (text / textContains / contentDesc / resourceId / className / clickable). Falls back to raw x/y. Prefer this over coordinate taps. |
+| `ui_type` | Types text into the currently focused field; optional `pressEnter`. |
+| `ui_swipe` | Swipes from (x1,y1) to (x2,y2) over a duration. |
+| `ui_wait_for` | Polls the accessibility tree until a selector matches (default 8s timeout). Use after `launch_app` or navigation. |
+| `ui_screenshot` | Grabs a PNG; saves to `localPath` OR returns the image inline (base64) so Claude can view it directly. |
+| `ui_back`, `ui_home` | Android BACK / HOME keys. |
+
+### App / package / permission
+
+| Tool | What it does |
+|---|---|
+| `launch_app` | Starts an app by package. Auto-resolves the LAUNCHER activity (avoids Samsung's resolver dialog). Supports URL deep links for VIEW intents (great for `com.android.chrome` + `http://…`). |
+| `list_apps` | `pm list packages`, with `thirdPartyOnly` and `filter`. |
+| `install_apk_url` | Downloads an APK from a URL, caches it, `adb install -r`. |
+| `install_apk` | Installs an APK already on disk. |
+| `uninstall_app`, `grant_permission` | Standard pm operations. |
+
+### Observability
+
+| Tool | What it does |
+|---|---|
+| `list_notifications` | Parses `dumpsys notification --noredact` into `{pkg, title, text}` entries. |
+| `current_activity` | Foreground package + activity. |
+| `device_info` | Model, manufacturer, Android version, SDK, CPU ABI. |
+| `list_devices` | `adb devices -l`. |
+
+### SSH transport (preferred post-bootstrap)
+
+| Tool | What it does |
+|---|---|
+| `ssh_info` | Shows target + key the server uses. |
+| `ssh_termux` | Run a command inside Termux over SSH on port 8022. |
+| `ssh_debian` | Run a command inside the Debian proot (glibc userland). |
+| `claude_run` | One-shot `claude -p <prompt>` inside the Debian proot as the non-root `dev` user — returns stdout. |
+
+### Bootstrap + recovery
+
+| Tool | What it does |
+|---|---|
+| `install_termux` | Downloads the Termux APK from GitHub and installs it. |
+| `open_termux`, `termux_type`, `termux_run_command` | Drive Termux before SSH is up. |
+| `setup_claude_code_in_termux` | Walks the pkg-install sequence. |
+| `start_shizuku` | Restarts Shizuku's shell-UID service via USB adb (needed after every reboot — Android 14 rotates Wireless Debugging TLS keys). |
+| `adb_path` | Shows which adb binary the server is using. |
+
+### Low-level (escape hatches)
+
+| Tool | What it does |
+|---|---|
+| `shell` | Raw `adb shell` pass-through. |
+| `push`, `pull` | File transfer. |
+| `screencap`, `keyevent`, `input_text` | Pre-uiautomator UI primitives. |
+
+## Runnable examples
+
+Each `examples/*.md` is a self-contained brief you can paste into Claude Code.
+
+1. **[Read notifications and summarize](examples/01-read-notifications.md)** —
+   one tool call, Claude summarizes what's happening on your phone.
+2. **[Drive Settings by text selector](examples/02-ui-drive-settings.md)** —
+   navigate Samsung's Settings app without a single hard-coded coordinate.
+3. **[Build and serve a webapp from the phone](examples/03-build-and-serve.md)**
+   — phone-Claude writes a full-stack demo, runs it in Termux, opens it in
+   phone-Chrome.
 
 ## Architecture
 
