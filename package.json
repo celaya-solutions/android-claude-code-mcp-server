@@ -1,0 +1,19 @@
+{
+  "name": "android-mcp-server",
+  "version": "0.1.0",
+  "description": "MCP server to drive an Android device via ADB (install Termux, run shell, set up Claude Code).",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "android-mcp-server": "src/index.js"
+  },
+  "scripts": {
+    "start": "node src/index.js"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.0.4"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}
