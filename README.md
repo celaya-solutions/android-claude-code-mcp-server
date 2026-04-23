@@ -163,42 +163,54 @@ Mac (MCP host)
 - USB debugging authorized for your Mac
 - Enough free storage for Debian (~500 MB after install)
 
-### Install the MCP server
+### One-command bootstrap
 
 ```bash
 git clone https://github.com/celaya-solutions/android-claude-code-mcp-server.git
 cd android-claude-code-mcp-server
 npm install
+node bin/cli.js init
 ```
 
-Register it with Claude Code at user scope:
+That runs the full 9-phase flow (~80 s on a new device, < 10 s re-run):
+
+1. **preflight** — adb, authorized device, ssh pubkey, LAN IP discovery
+2. **apks** — Termux, Termux:API, Termux:Boot, Shizuku (downloaded from GitHub,
+   installed via adb, Play Protect verifier disabled)
+3. **ssh** — Mac pubkey → `~/.ssh/authorized_keys` in Termux, start sshd
+4. **pkgs** — `pkg install openssh gh termux-api android-tools proot-distro`
+5. **debian** — Debian trixie arm64 rootfs from images.linuxcontainers.org,
+   extracted into `proot-distro`'s expected layout, DNS seeded
+6. **claude** — Node 24 (NodeSource), `@anthropic-ai/claude-code`, official gh
+   apt repo, non-root `dev` user with cloned auth
+7. **rish** — extracts `rish` + `rish_shizuku.dex` from the cached Shizuku APK,
+   installs `droid-sh` wrappers in both Termux and Debian (Debian version tunnels
+   to Termux over localhost SSH)
+8. **boot** — `~/.termux/boot/00-start-sshd`, Termux:Boot registered, Doze
+   whitelist for all 4 packages
+9. **shizuku** — starts `libshizuku.so`, verifies `droid-sh -c id` returns
+   `uid=2000(shell)`
+
+Every phase is idempotent — re-run after a reboot or partial failure.
+
+**Skip phases** you don't want: `node bin/cli.js init --skip boot,shizuku`.
+
+**Interactive one-time steps** the script intentionally leaves for you:
+
+- `gh auth login --web` inside Termux and Debian
+- Install the Tailscale Android app and sign in (for tailnet access)
+- `claude mcp add android-mcp-server --scope user -- node "$PWD/src/index.js"`
+
+### Optional env vars
 
 ```bash
-claude mcp add android-mcp-server --scope user -- node "$(pwd)/src/index.js"
-```
-
-Optional env vars (read by the server at startup):
-
-```bash
-ANDROID_MCP_SSH_TARGET=u0_a386@100.74.202.32:8022   # or a Tailscale MagicDNS name
-ANDROID_MCP_SSH_KEY=$HOME/.ssh/id_ed25519
 ADB_PATH=$HOME/Library/Android/sdk/platform-tools/adb
+ANDROID_MCP_SSH_KEY=$HOME/.ssh/id_ed25519.pub
+ANDROID_MCP_SSH_TARGET=u0_a386@100.74.202.32:8022   # or a MagicDNS name
+ANDROID_MCP_CACHE=$HOME/.cache/android-mcp-server
+GIT_USER_NAME="Your Name"
+GIT_USER_EMAIL="you@example.com"
 ```
-
-### Bootstrap the phone
-
-With the phone on USB and adb authorized, from Claude Code:
-
-1. `install_termux` — downloads the Termux APK from GitHub and installs it
-2. `open_termux`
-3. `termux_run_command` with `scripts/bootstrap.sh` pushed via `push`, or just call
-   `setup_claude_code_in_termux` and follow the prompts
-4. Run `gh auth login --web` inside Termux + Debian (one-time, interactive)
-5. Install Shizuku (`gh release download` + `install_apk`) and start it with
-   `start_shizuku`
-6. From inside Termux, you can now run `droid-sh "id"` and see `uid=2000(shell)`
-
-See `scripts/bootstrap.sh` for the full end-to-end sequence this project lands on.
 
 ### Reboot recovery
 
